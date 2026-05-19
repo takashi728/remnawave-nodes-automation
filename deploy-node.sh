@@ -3,8 +3,8 @@ set -e
 
 # ============================================
 # Remnawave Node Deployment Script
-# Usage: sudo ./deploy-node.sh <DOMAIN> [NODE_PORT] [SECRET_KEY] [PANEL_IP]
-# Example: sudo ./deploy-node.sh node42.example.com 2222 "supersecret" "203.0.113.10"
+# Primary input: DOMAIN (e.g. node42.example.com)
+# Usage: sudo ./deploy-node.sh node42.example.com [2222] ["your-secret"] ["panel-ip"]
 # ============================================
 
 DOMAIN="$1"
@@ -22,58 +22,55 @@ INSTALL_DIR="/opt/remnanode"
 CERT_DIR="$INSTALL_DIR/certs"
 LOG_DIR="/var/log/remnanode"
 
-echo "=== Remnawave Node Deployment for $DOMAIN ==="
+echo "=== Remnawave Node Deployment ==="
+echo "Domain: $DOMAIN"
 
-# --- 1. Install Docker if missing ---
+# Install Docker
 if ! command -v docker &> /dev/null; then
     echo "Installing Docker..."
     curl -fsSL https://get.docker.com | sh
-    systemctl enable --now docker
+    systemctl enable --now docker || true
 fi
 
-# --- 2. Create directories ---
 mkdir -p "$INSTALL_DIR" "$CERT_DIR" "$LOG_DIR"
 cd "$INSTALL_DIR"
 
-# --- 3. Install acme.sh if missing ---
-if [ ! -f /root/.acme.sh/acme.sh ]; then
-    echo "Installing acme.sh..."
-    curl https://get.acme.sh | sh -s email=admin@$DOMAIN
+# acme.sh
+if [ ! -f ~/.acme.sh/acme.sh ]; then
+    curl https://get.acme.sh | sh
 fi
 
-# --- 4. Issue certificate (standalone) ---
-# Note: If port 443 is in use, stop services first or switch to DNS challenge
+# Issue certificate
 if [ ! -f "$CERT_DIR/fullchain.pem" ]; then
-    echo "Issuing Let's Encrypt certificate for $DOMAIN ..."
-    /root/.acme.sh/acme.sh --issue -d "$DOMAIN" \
+    echo "Issuing certificate for $DOMAIN (standalone mode)..."
+    ~/.acme.sh/acme.sh --issue -d "$DOMAIN" \
         --standalone \
         --key-file "$CERT_DIR/privkey.key" \
         --fullchain-file "$CERT_DIR/fullchain.pem" || {
-        echo "Certificate issuance failed. Try DNS challenge or free port 443 temporarily."
+        echo "Failed. Try DNS challenge or temporarily stop other services on port 443."
         exit 1
     }
-else
-    echo "Certificate already exists."
 fi
 
-# --- 5. Setup renewal hook ---
-/root/.acme.sh/acme.sh install-cert -d "$DOMAIN" \
+# Renewal hook
+~/.acme.sh/acme.sh install-cert -d "$DOMAIN" \
     --key-file "$CERT_DIR/privkey.key" \
     --fullchain-file "$CERT_DIR/fullchain.pem" \
     --renew-hook "cd $INSTALL_DIR && docker compose restart remnanode || true"
 
-# --- 6. Prompt for SECRET_KEY if not provided ---
+# SECRET_KEY prompt
 if [ -z "$SECRET_KEY" ]; then
-    read -p "Enter SECRET_KEY from Remnawave Panel: " SECRET_KEY
+    read -sp "Paste SECRET_KEY from Panel: " SECRET_KEY
+    echo
 fi
 
 if [ -z "$SECRET_KEY" ]; then
-    echo "SECRET_KEY is required."
+    echo "SECRET_KEY required"
     exit 1
 fi
 
-# --- 7. Generate docker-compose.yml ---
-cat > docker-compose.yml << 'EOF'
+# Generate docker-compose.yml (variables expanded)
+cat > docker-compose.yml << 'COMPOSEEOF'
 services:
   remnanode:
     container_name: remnanode
@@ -81,13 +78,12 @@ services:
     restart: always
     network_mode: host
     environment:
-      - NODE_PORT=${NODE_PORT}
-      - SECRET_KEY=${SECRET_KEY}
+      - NODE_PORT=PLACEHOLDER_NODE_PORT
+      - SECRET_KEY=PLACEHOLDER_SECRET
     volumes:
       - ./certs:/var/lib/remnawave/configs/xray/ssl:ro
-      - ${LOG_DIR}:/var/log/remnanode
+      - /var/log/remnanode:/var/log/remnanode
 
-  # Default lightweight fallback (nginx). Replace with Excalidraw or Matrix as needed.
   fallback:
     container_name: fallback
     image: nginx:alpine
@@ -97,44 +93,36 @@ services:
       - "9443:80"
     volumes:
       - ./fallback-html:/usr/share/nginx/html:ro
-EOF
+COMPOSEEOF
 
-# Create simple fallback page
+# Replace placeholders
+sed -i "s/PLACEHOLDER_NODE_PORT/$NODE_PORT/g" docker-compose.yml
+sed -i "s/PLACEHOLDER_SECRET/$SECRET_KEY/g" docker-compose.yml
+
+# Fallback HTML
 mkdir -p fallback-html
 cat > fallback-html/index.html << 'HTMLEOF'
 <!DOCTYPE html>
-<html>
-<head><title>Service</title></head>
-<body style="font-family:sans-serif; text-align:center; padding:50px;">
-  <h1>Service Temporarily Unavailable</h1>
-  <p>This domain is used for secure proxy services.</p>
-</body>
-</html>
+<html><head><title>Service</title></head>
+<body style="text-align:center;font-family:sans-serif;padding:40px">
+<h1>Secure Infrastructure</h1>
+<p>This domain is active for proxy services.</p>
+</body></html>
 HTMLEOF
 
-# --- 8. Setup firewall ---
+# Firewall
 if command -v ufw &> /dev/null; then
-    echo "Configuring UFW..."
     ufw allow 443/tcp
-    if [ -n "$PANEL_IP" ]; then
-        ufw allow from "$PANEL_IP" to any port ${NODE_PORT}
-    else
-        echo "WARNING: No PANEL_IP provided. Manually allow ${NODE_PORT} from your Panel IP."
-    fi
+    [ -n "$PANEL_IP" ] && ufw allow from "$PANEL_IP" to any port $NODE_PORT
     ufw --force enable
 fi
 
-# --- 9. Start containers ---
-echo "Starting containers..."
+# Start
+echo "Starting services..."
 docker compose up -d
-
 docker compose ps
 
 echo ""
-echo "=== Deployment Complete for $DOMAIN ==="
-echo "Next steps:"
-echo "1. Go to Remnawave Panel and finish adding/editing the node (select Config Profile)."
-echo "2. Test fallback: https://$DOMAIN"
-echo "3. Test proxy connection using the node domain."
-echo ""
-echo "To update later: cd $INSTALL_DIR && docker compose pull && docker compose up -d"
+echo "✅ Node for $DOMAIN is ready!"
+echo "Visit https://$DOMAIN to test fallback."
+echo "Complete setup in Remnawave Panel UI."
