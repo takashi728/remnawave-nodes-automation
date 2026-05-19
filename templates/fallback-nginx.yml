@@ -1,0 +1,10 @@
+services:
+  fallback:
+    image: nginx:alpine
+    container_name: fallback-nginx
+    restart: always
+    network_mode: host
+    ports:
+      - "9443:80"
+    volumes:
+      - ./fallback-html:/usr/share/nginx/html:ro

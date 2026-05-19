@@ -1,0 +1,11 @@
+services:
+  fallback:
+    image: quay.io/hedgedoc/hedgedoc:latest
+    container_name: fallback-hedgedoc
+    restart: always
+    network_mode: host
+    ports:
+      - "9443:80"
+    environment:
+      - CMD_DOMAIN=your-node-domain.example.com
+      - CMD_PORT=3000

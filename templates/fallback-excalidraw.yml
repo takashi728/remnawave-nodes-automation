@@ -1,0 +1,11 @@
+services:
+  fallback:
+    image: excalidraw/excalidraw:latest
+    container_name: fallback-excalidraw
+    restart: always
+    network_mode: host
+    ports:
+      - "9443:80"
+    # For collaboration (optional advanced):
+    # environment:
+    #   - VITE_APP_WS_SERVER_URL=wss://your-room-server.example.com
