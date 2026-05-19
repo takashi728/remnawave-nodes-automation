@@ -1,0 +1,6 @@
+# Remnawave Node deployment ignores
+certs/
+*.log
+.env
+node_modules/
+docker-compose.override.yml

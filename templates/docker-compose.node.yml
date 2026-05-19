@@ -1,0 +1,33 @@
+services:
+  remnanode:
+    container_name: remnanode
+    image: remnawave/node:latest
+    restart: always
+    network_mode: host
+    environment:
+      - NODE_PORT=2222
+      - SECRET_KEY=REPLACE_ME
+    volumes:
+      - ./certs:/var/lib/remnawave/configs/xray/ssl:ro
+      - /var/log/remnanode:/var/log/remnanode
+
+  # === FALLBACK SERVICE ===
+  # Option 1: Lightweight nginx (current default)
+  fallback:
+    image: nginx:alpine
+    restart: always
+    network_mode: host
+    ports:
+      - "9443:80"
+    volumes:
+      - ./fallback-html:/usr/share/nginx/html:ro
+
+  # Option 2: Excalidraw (uncomment and adjust)
+  # fallback:
+  #   image: excalidraw/excalidraw
+  #   restart: always
+  #   network_mode: host
+  #   ports:
+  #     - "9443:80"
+
+  # Option 3: Matrix / Synapse (more complex - use official compose)
