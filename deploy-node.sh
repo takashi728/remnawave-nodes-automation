@@ -3,12 +3,10 @@ set -e
 
 DOMAIN="$1"
 NODE_PORT="${2:-2222}"
-SECRET_KEY="$3"
-PANEL_IP="${4:-}"
-FALLBACK_TYPE="${5:-excalidraw}"
+PANEL_IP="${3:-}"
 
 if [ -z "$DOMAIN" ]; then
-    echo "Usage: $0 <domain> [port] [secret] [panel_ip] [fallback: excalidraw|hedgedoc|nginx]"
+    echo "Usage: sudo $0 <domain> [2222] [PANEL_IP]"
     exit 1
 fi
 
@@ -16,12 +14,10 @@ INSTALL_DIR="/opt/remnanode"
 CERT_DIR="$INSTALL_DIR/certs"
 LOG_DIR="/var/log/remnanode"
 
-echo "=== Deploying Remnawave Node for $DOMAIN ==="
-echo "Fallback: $FALLBACK_TYPE"
+ echo "=== Deploying Remnawave Node for $DOMAIN ==="
 
 # 1. Docker
 if ! command -v docker &> /dev/null; then
-    echo "Installing Docker..."
     curl -fsSL https://get.docker.com | sh
     systemctl enable --now docker || true
 fi
@@ -31,32 +27,22 @@ cd "$INSTALL_DIR"
 
 # 2. acme.sh
 if [ ! -f ~/.acme.sh/acme.sh ]; then
-    echo "Installing acme.sh..."
-    curl https://get.acme.sh | sh -s email=admin@$DOMAIN
+    curl https://get.acme.sh | sh
     source ~/.bashrc 2>/dev/null || true
 fi
 
-# 3. Issue cert (with renew-hook)
+# 3. Issue cert if missing
 if [ ! -f "$CERT_DIR/fullchain.pem" ]; then
-    echo "Issuing certificate for $DOMAIN..."
+    echo "Issuing certificate..."
     ~/.acme.sh/acme.sh --issue -d "$DOMAIN" \
         --standalone \
         --key-file "$CERT_DIR/privkey.key" \
-        --fullchain-file "$CERT_DIR/fullchain.pem" \
-        --renew-hook "cd $INSTALL_DIR && docker compose restart remnanode || true"
-else
-    echo "Certificate already exists."
+        --fullchain-file "$CERT_DIR/fullchain.pem"
 fi
 
-# 4. Install cert + reload hook (FIXED: added --)
-~/.acme.sh/acme.sh --install-cert -d "$DOMAIN" \
-    --key-file "$CERT_DIR/privkey.key" \
-    --fullchain-file "$CERT_DIR/fullchain.pem" \
-    --reloadcmd "cd $INSTALL_DIR && docker compose restart remnanode || true"
-
-# 5. SECRET_KEY
+# 4. Ask for SECRET_KEY securely
 if [ -z "$SECRET_KEY" ]; then
-    read -sp "Enter SECRET_KEY from Remnawave Panel: " SECRET_KEY
+    read -sp "Paste SECRET_KEY from Remnawave Panel: " SECRET_KEY
     echo
 fi
 
@@ -65,10 +51,8 @@ if [ -z "$SECRET_KEY" ]; then
     exit 1
 fi
 
-# 6. Generate docker-compose
-case "$FALLBACK_TYPE" in
-  excalidraw)
-    cat > docker-compose.yml << 'EOF'
+# 5. Generate docker-compose.yml with REAL expanded values
+cat > docker-compose.yml << EOF
 services:
   remnanode:
     image: remnawave/node:latest
@@ -88,64 +72,12 @@ services:
     ports:
       - "9443:80"
 EOF
-    ;;
-  hedgedoc)
-    cat > docker-compose.yml << 'EOF'
-services:
-  remnanode:
-    image: remnawave/node:latest
-    restart: always
-    network_mode: host
-    environment:
-      - NODE_PORT=$NODE_PORT
-      - SECRET_KEY=$SECRET_KEY
-    volumes:
-      - ./certs:/var/lib/remnawave/configs/xray/ssl:ro
 
-  fallback:
-    image: quay.io/hedgedoc/hedgedoc:latest
-    restart: always
-    network_mode: host
-    ports:
-      - "9443:80"
-    environment:
-      - CMD_DOMAIN=$DOMAIN
-EOF
-    ;;
-  *)
-    cat > docker-compose.yml << 'EOF'
-services:
-  remnanode:
-    image: remnawave/node:latest
-    restart: always
-    network_mode: host
-    environment:
-      - NODE_PORT=$NODE_PORT
-      - SECRET_KEY=$SECRET_KEY
-    volumes:
-      - ./certs:/var/lib/remnawave/configs/xray/ssl:ro
-
-  fallback:
-    image: nginx:alpine
-    restart: always
-    network_mode: host
-    ports:
-      - "9443:80"
-    volumes:
-      - ./fallback-html:/usr/share/nginx/html:ro
-EOF
-
-    mkdir -p fallback-html
-    cat > fallback-html/index.html << 'HTMLEOF'
-<!DOCTYPE html>
-<html><head><title>Secure Service</title></head>
-<body style="font-family:system-ui;text-align:center;padding:60px">
-<h1>Secure Collaborative Infrastructure</h1>
-<p>This domain powers real web services.</p>
-</body></html>
-HTMLEOF
-    ;;
-esac
+# 6. Set reload hook (now safe because compose file exists)
+~/.acme.sh/acme.sh --install-cert -d "$DOMAIN" \
+    --key-file "$CERT_DIR/privkey.key" \
+    --fullchain-file "$CERT_DIR/fullchain.pem" \
+    --reloadcmd "cd $INSTALL_DIR && docker compose restart remnanode || true"
 
 # 7. Firewall
 if command -v ufw &> /dev/null; then
@@ -156,12 +88,11 @@ if command -v ufw &> /dev/null; then
     ufw --force enable
 fi
 
-# 8. Start
+# 8. Start containers
 echo "Starting containers..."
 docker compose up -d
 docker compose ps
 
 echo ""
 echo "✅ Deployment complete for $DOMAIN"
-echo "Fallback: $FALLBACK_TYPE on internal port 9443"
 echo "Test: https://$DOMAIN"
