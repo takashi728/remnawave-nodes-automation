@@ -4,10 +4,10 @@ set -e
 DOMAIN="$1"
 NODE_PORT="${2:-2222}"
 SECRET_KEY="$3"
+EMAIL="${4:-admin@$DOMAIN}"
 
 if [ -z "$DOMAIN" ]; then
-    echo "Usage: sudo $0 <domain> [2222] [SECRET_KEY]"
-    echo "Create the node in Remnawave Panel first to get SECRET_KEY"
+    echo "Usage: sudo $0 <domain> [2222] [SECRET_KEY] [email]"
     exit 1
 fi
 
@@ -16,12 +16,12 @@ NGINX_DIR="$INSTALL_DIR/nginx"
 CERT_DIR="$NGINX_DIR"
 LOG_DIR="/var/log/remnanode"
 
- echo "=== Setting up Remnawave Node + Stealth Fallback for $DOMAIN ==="
+ echo "=== Setting up Remnawave Node for $DOMAIN ==="
 
 mkdir -p "$INSTALL_DIR" "$NGINX_DIR" "$LOG_DIR"
 cd "$INSTALL_DIR"
 
-# 1. Install Docker
+# 1. Docker
 if ! command -v docker &> /dev/null; then
     curl -fsSL https://get.docker.com | sh
     systemctl enable --now docker || true
@@ -29,12 +29,18 @@ fi
 
 # 2. Install acme.sh
 if [ ! -f ~/.acme.sh/acme.sh ]; then
-    curl https://get.acme.sh | sh
+    curl https://get.acme.sh | sh -s email="$EMAIL"
 fi
 
-# 3. Issue certificate
+# 3. Force Let's Encrypt (avoid ZeroSSL default)
+~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
+
+# 4. Register account if needed
+~/.acme.sh/acme.sh --register-account -m "$EMAIL" || true
+
+# 5. Issue certificate
 if [ ! -f "$CERT_DIR/fullchain.pem" ]; then
-    echo "Issuing certificate (standalone on port 8443)..."
+    echo "Issuing Let's Encrypt certificate..."
     ~/.acme.sh/acme.sh --issue -d "$DOMAIN" \
         --standalone \
         --tlsport 8443 \
@@ -42,7 +48,7 @@ if [ ! -f "$CERT_DIR/fullchain.pem" ]; then
         --fullchain-file "$CERT_DIR/fullchain.pem"
 fi
 
-# 4. Get SECRET_KEY
+# 6. Get SECRET_KEY
 if [ -z "$SECRET_KEY" ]; then
     read -sp "Paste SECRET_KEY from Remnawave Panel: " SECRET_KEY
     echo
@@ -53,7 +59,7 @@ if [ -z "$SECRET_KEY" ]; then
     exit 1
 fi
 
-# 5. Generate docker-compose with correct certificate path for Remnawave
+# 7. Generate docker-compose
 cat > docker-compose.yml << 'EOF'
 services:
   remnanode:
@@ -92,7 +98,7 @@ networks:
     driver: bridge
 EOF
 
-# 6. Create nginx config
+# 8. Nginx config
 cat > nginx/nginx.conf << 'NGINXEOF'
 events { worker_connections 1024; }
 
@@ -115,18 +121,17 @@ http {
 }
 NGINXEOF
 
-# 7. Set reload hook
+# 9. Reload hook
 ~/.acme.sh/acme.sh --install-cert -d "$DOMAIN" \
     --key-file "$CERT_DIR/privkey.key" \
     --fullchain-file "$CERT_DIR/fullchain.pem" \
     --reloadcmd "cd $INSTALL_DIR && docker compose restart nginx || true"
 
-# 8. Start
+# 10. Start
 echo "Starting containers..."
 docker compose up -d
 docker compose ps
 
 echo ""
-echo "✅ Setup complete for $DOMAIN"
-echo "Fallback available on https://$DOMAIN:9443"
+echo "✅ Done for $DOMAIN"
 echo "Test: https://$DOMAIN:9443"
