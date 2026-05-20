@@ -5,11 +5,10 @@ DOMAIN="$1"
 NODE_PORT="${2:-2222}"
 SECRET_KEY="$3"
 PANEL_IP="${4:-}"
-FALLBACK_TYPE="${5:-excalidraw}"   # excalidraw, hedgedoc, nginx
+FALLBACK_TYPE="${5:-excalidraw}"
 
 if [ -z "$DOMAIN" ]; then
-    echo "Usage: $0 <domain> [port] [secret] [panel_ip] [fallback_type]"
-    echo "Fallback types: excalidraw (default), hedgedoc, nginx"
+    echo "Usage: $0 <domain> [port] [secret] [panel_ip] [fallback: excalidraw|hedgedoc|nginx]"
     exit 1
 fi
 
@@ -20,8 +19,9 @@ LOG_DIR="/var/log/remnanode"
 echo "=== Deploying Remnawave Node for $DOMAIN ==="
 echo "Fallback: $FALLBACK_TYPE"
 
-# Docker
+# 1. Docker
 if ! command -v docker &> /dev/null; then
+    echo "Installing Docker..."
     curl -fsSL https://get.docker.com | sh
     systemctl enable --now docker || true
 fi
@@ -29,27 +29,43 @@ fi
 mkdir -p "$INSTALL_DIR" "$CERT_DIR" "$LOG_DIR"
 cd "$INSTALL_DIR"
 
-# acme.sh
+# 2. acme.sh
 if [ ! -f ~/.acme.sh/acme.sh ]; then
-    curl https://get.acme.sh | sh
+    echo "Installing acme.sh..."
+    curl https://get.acme.sh | sh -s email=admin@$DOMAIN
+    source ~/.bashrc 2>/dev/null || true
 fi
 
+# 3. Issue cert (with renew-hook)
 if [ ! -f "$CERT_DIR/fullchain.pem" ]; then
-    ~/.acme.sh/acme.sh --issue -d "$DOMAIN" --standalone \
+    echo "Issuing certificate for $DOMAIN..."
+    ~/.acme.sh/acme.sh --issue -d "$DOMAIN" \
+        --standalone \
         --key-file "$CERT_DIR/privkey.key" \
-        --fullchain-file "$CERT_DIR/fullchain.pem"
+        --fullchain-file "$CERT_DIR/fullchain.pem" \
+        --renew-hook "cd $INSTALL_DIR && docker compose restart remnanode || true"
+else
+    echo "Certificate already exists."
 fi
 
-~/.acme.sh/acme.sh install-cert -d "$DOMAIN" \
+# 4. Install cert + reload hook (FIXED: added --)
+~/.acme.sh/acme.sh --install-cert -d "$DOMAIN" \
     --key-file "$CERT_DIR/privkey.key" \
     --fullchain-file "$CERT_DIR/fullchain.pem" \
-    --renew-hook "cd $INSTALL_DIR && docker compose restart remnanode || true"
+    --reloadcmd "cd $INSTALL_DIR && docker compose restart remnanode || true"
 
+# 5. SECRET_KEY
 if [ -z "$SECRET_KEY" ]; then
-    read -sp "SECRET_KEY from Panel: " SECRET_KEY; echo
+    read -sp "Enter SECRET_KEY from Remnawave Panel: " SECRET_KEY
+    echo
 fi
 
-# Generate docker-compose based on fallback type
+if [ -z "$SECRET_KEY" ]; then
+    echo "SECRET_KEY is required!"
+    exit 1
+fi
+
+# 6. Generate docker-compose
 case "$FALLBACK_TYPE" in
   excalidraw)
     cat > docker-compose.yml << 'EOF'
@@ -73,7 +89,6 @@ services:
       - "9443:80"
 EOF
     ;;
-
   hedgedoc)
     cat > docker-compose.yml << 'EOF'
 services:
@@ -97,8 +112,7 @@ services:
       - CMD_DOMAIN=$DOMAIN
 EOF
     ;;
-
-  nginx|*)
+  *)
     cat > docker-compose.yml << 'EOF'
 services:
   remnanode:
@@ -120,33 +134,34 @@ services:
     volumes:
       - ./fallback-html:/usr/share/nginx/html:ro
 EOF
+
+    mkdir -p fallback-html
+    cat > fallback-html/index.html << 'HTMLEOF'
+<!DOCTYPE html>
+<html><head><title>Secure Service</title></head>
+<body style="font-family:system-ui;text-align:center;padding:60px">
+<h1>Secure Collaborative Infrastructure</h1>
+<p>This domain powers real web services.</p>
+</body></html>
+HTMLEOF
     ;;
 esac
 
-# Create nice fallback content for nginx
-if [ "$FALLBACK_TYPE" = "nginx" ]; then
-  mkdir -p fallback-html
-  cat > fallback-html/index.html << 'HTMLEOF'
-<!DOCTYPE html>
-<html><head><title>Collaborative Workspace</title></head>
-<body style="font-family:system-ui;text-align:center;padding:60px;background:#f8f9fa">
-<h1>Secure Collaborative Environment</h1>
-<p>This infrastructure supports real-time collaboration tools.</p>
-</body></html>
-HTMLEOF
-fi
-
-# Firewall
+# 7. Firewall
 if command -v ufw &> /dev/null; then
-    ufw allow 443/tcp
-    [ -n "$PANEL_IP" ] && ufw allow from "$PANEL_IP" to any port $NODE_PORT
+    ufw allow 443/tcp comment 'Remnawave'
+    if [ -n "$PANEL_IP" ]; then
+        ufw allow from "$PANEL_IP" to any port $NODE_PORT comment 'Panel'
+    fi
     ufw --force enable
 fi
 
+# 8. Start
+echo "Starting containers..."
 docker compose up -d
 docker compose ps
 
 echo ""
-echo "✅ Node deployed successfully!"
-echo "Fallback ($FALLBACK_TYPE) running on internal port 9443"
+echo "✅ Deployment complete for $DOMAIN"
+echo "Fallback: $FALLBACK_TYPE on internal port 9443"
 echo "Test: https://$DOMAIN"
