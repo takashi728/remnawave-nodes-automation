@@ -32,7 +32,7 @@ if [ ! -f ~/.acme.sh/acme.sh ]; then
     curl https://get.acme.sh | sh
 fi
 
-# 3. Issue certificate (use different port to avoid conflict)
+# 3. Issue certificate
 if [ ! -f "$CERT_DIR/fullchain.pem" ]; then
     echo "Issuing certificate (standalone on port 8443)..."
     ~/.acme.sh/acme.sh --issue -d "$DOMAIN" \
@@ -53,7 +53,7 @@ if [ -z "$SECRET_KEY" ]; then
     exit 1
 fi
 
-# 5. Generate docker-compose with remnanode + fallback + nginx proxy
+# 5. Generate docker-compose with correct certificate path for Remnawave
 cat > docker-compose.yml << 'EOF'
 services:
   remnanode:
@@ -64,7 +64,7 @@ services:
       - NODE_PORT=${NODE_PORT}
       - SECRET_KEY=${SECRET_KEY}
     volumes:
-      - ./nginx:/etc/nginx/certs:ro
+      - ./nginx:/var/lib/remnawave/configs/xray/ssl:ro
       - ${LOG_DIR}:/var/log/remnanode
 
   fallback:
@@ -92,7 +92,7 @@ networks:
     driver: bridge
 EOF
 
-# 6. Create nginx config for fallback
+# 6. Create nginx config
 cat > nginx/nginx.conf << 'NGINXEOF'
 events { worker_connections 1024; }
 
@@ -128,5 +128,5 @@ docker compose ps
 
 echo ""
 echo "✅ Setup complete for $DOMAIN"
-echo "Fallback available on https://$DOMAIN:9443 (via Nginx)"
-echo "Test by visiting: https://$DOMAIN:9443"
+echo "Fallback available on https://$DOMAIN:9443"
+echo "Test: https://$DOMAIN:9443"
