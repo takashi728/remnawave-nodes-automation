@@ -3,10 +3,11 @@ set -e
 
 DOMAIN="$1"
 NODE_PORT="${2:-2222}"
-PANEL_IP="${3:-}"
+SECRET_KEY="$3"
 
 if [ -z "$DOMAIN" ]; then
-    echo "Usage: sudo $0 <domain> [2222] [PANEL_IP]"
+    echo "Usage: sudo $0 <domain> [2222] [SECRET_KEY]"
+    echo "(Create the node in Remnawave Panel first and copy the generated docker-compose.yml)"
     exit 1
 fi
 
@@ -14,33 +15,33 @@ INSTALL_DIR="/opt/remnanode"
 CERT_DIR="$INSTALL_DIR/certs"
 LOG_DIR="/var/log/remnanode"
 
- echo "=== Deploying Remnawave Node for $DOMAIN ==="
+ echo "=== Setting up Remnawave Node for $DOMAIN ==="
 
-# 1. Docker
+mkdir -p "$INSTALL_DIR" "$CERT_DIR" "$LOG_DIR"
+cd "$INSTALL_DIR"
+
+# Install Docker if missing
 if ! command -v docker &> /dev/null; then
     curl -fsSL https://get.docker.com | sh
     systemctl enable --now docker || true
 fi
 
-mkdir -p "$INSTALL_DIR" "$CERT_DIR" "$LOG_DIR"
-cd "$INSTALL_DIR"
-
-# 2. acme.sh
+# Install acme.sh if missing
 if [ ! -f ~/.acme.sh/acme.sh ]; then
     curl https://get.acme.sh | sh
     source ~/.bashrc 2>/dev/null || true
 fi
 
-# 3. Issue cert if missing
+# Issue certificate
 if [ ! -f "$CERT_DIR/fullchain.pem" ]; then
-    echo "Issuing certificate..."
+    echo "Issuing Let's Encrypt certificate..."
     ~/.acme.sh/acme.sh --issue -d "$DOMAIN" \
         --standalone \
         --key-file "$CERT_DIR/privkey.key" \
         --fullchain-file "$CERT_DIR/fullchain.pem"
 fi
 
-# 4. Ask for SECRET_KEY securely
+# Get SECRET_KEY if not provided
 if [ -z "$SECRET_KEY" ]; then
     read -sp "Paste SECRET_KEY from Remnawave Panel: " SECRET_KEY
     echo
@@ -51,7 +52,7 @@ if [ -z "$SECRET_KEY" ]; then
     exit 1
 fi
 
-# 5. Generate docker-compose.yml with REAL expanded values
+# Generate proper docker-compose.yml with remnanode + fallback
 cat > docker-compose.yml << EOF
 services:
   remnanode:
@@ -65,6 +66,7 @@ services:
       - ./certs:/var/lib/remnawave/configs/xray/ssl:ro
       - $LOG_DIR:/var/log/remnanode
 
+  # Fallback service (real web app for camouflage)
   fallback:
     image: excalidraw/excalidraw:latest
     restart: always
@@ -73,26 +75,19 @@ services:
       - "9443:80"
 EOF
 
-# 6. Set reload hook (now safe because compose file exists)
+# Set proper reload hook for certificate renewal
 ~/.acme.sh/acme.sh --install-cert -d "$DOMAIN" \
     --key-file "$CERT_DIR/privkey.key" \
     --fullchain-file "$CERT_DIR/fullchain.pem" \
     --reloadcmd "cd $INSTALL_DIR && docker compose restart remnanode || true"
 
-# 7. Firewall
-if command -v ufw &> /dev/null; then
-    ufw allow 443/tcp comment 'Remnawave'
-    if [ -n "$PANEL_IP" ]; then
-        ufw allow from "$PANEL_IP" to any port $NODE_PORT comment 'Panel'
-    fi
-    ufw --force enable
-fi
-
-# 8. Start containers
-echo "Starting containers..."
-docker compose up -d
+# Start
+ docker compose up -d
 docker compose ps
 
 echo ""
-echo "✅ Deployment complete for $DOMAIN"
-echo "Test: https://$DOMAIN"
+echo "✅ Node setup complete for $DOMAIN"
+echo "Fallback (Excalidraw) running on internal port 9443"
+echo "Test by visiting: https://$DOMAIN"
+echo ""
+echo "Important: Make sure you created the node in Remnawave Panel and assigned a Config Profile."
