@@ -7,87 +7,126 @@ SECRET_KEY="$3"
 
 if [ -z "$DOMAIN" ]; then
     echo "Usage: sudo $0 <domain> [2222] [SECRET_KEY]"
-    echo "(Create the node in Remnawave Panel first and copy the generated docker-compose.yml)"
+    echo "Create the node in Remnawave Panel first to get SECRET_KEY"
     exit 1
 fi
 
 INSTALL_DIR="/opt/remnanode"
-CERT_DIR="$INSTALL_DIR/certs"
+NGINX_DIR="$INSTALL_DIR/nginx"
+CERT_DIR="$NGINX_DIR"
 LOG_DIR="/var/log/remnanode"
 
- echo "=== Setting up Remnawave Node for $DOMAIN ==="
+ echo "=== Setting up Remnawave Node + Stealth Fallback for $DOMAIN ==="
 
-mkdir -p "$INSTALL_DIR" "$CERT_DIR" "$LOG_DIR"
+mkdir -p "$INSTALL_DIR" "$NGINX_DIR" "$LOG_DIR"
 cd "$INSTALL_DIR"
 
-# Install Docker if missing
+# 1. Install Docker
 if ! command -v docker &> /dev/null; then
     curl -fsSL https://get.docker.com | sh
     systemctl enable --now docker || true
 fi
 
-# Install acme.sh if missing
+# 2. Install acme.sh
 if [ ! -f ~/.acme.sh/acme.sh ]; then
     curl https://get.acme.sh | sh
-    source ~/.bashrc 2>/dev/null || true
 fi
 
-# Issue certificate
+# 3. Issue certificate (use different port to avoid conflict)
 if [ ! -f "$CERT_DIR/fullchain.pem" ]; then
-    echo "Issuing Let's Encrypt certificate..."
+    echo "Issuing certificate (standalone on port 8443)..."
     ~/.acme.sh/acme.sh --issue -d "$DOMAIN" \
         --standalone \
+        --tlsport 8443 \
         --key-file "$CERT_DIR/privkey.key" \
         --fullchain-file "$CERT_DIR/fullchain.pem"
 fi
 
-# Get SECRET_KEY if not provided
+# 4. Get SECRET_KEY
 if [ -z "$SECRET_KEY" ]; then
     read -sp "Paste SECRET_KEY from Remnawave Panel: " SECRET_KEY
     echo
 fi
 
 if [ -z "$SECRET_KEY" ]; then
-    echo "SECRET_KEY is required!"
+    echo "SECRET_KEY required"
     exit 1
 fi
 
-# Generate proper docker-compose.yml with remnanode + fallback
-cat > docker-compose.yml << EOF
+# 5. Generate docker-compose with remnanode + fallback + nginx proxy
+cat > docker-compose.yml << 'EOF'
 services:
   remnanode:
     image: remnawave/node:latest
     restart: always
     network_mode: host
     environment:
-      - NODE_PORT=$NODE_PORT
-      - SECRET_KEY=$SECRET_KEY
+      - NODE_PORT=${NODE_PORT}
+      - SECRET_KEY=${SECRET_KEY}
     volumes:
-      - ./certs:/var/lib/remnawave/configs/xray/ssl:ro
-      - $LOG_DIR:/var/log/remnanode
+      - ./nginx:/etc/nginx/certs:ro
+      - ${LOG_DIR}:/var/log/remnanode
 
-  # Fallback service (real web app for camouflage)
   fallback:
     image: excalidraw/excalidraw:latest
     restart: always
-    network_mode: host
+    networks:
+      - remna
+
+  nginx:
+    image: nginx:alpine
+    restart: always
     ports:
-      - "9443:80"
+      - "9443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/fullchain.pem:/etc/nginx/ssl/fullchain.pem:ro
+      - ./nginx/privkey.key:/etc/nginx/ssl/privkey.key:ro
+    networks:
+      - remna
+    depends_on:
+      - fallback
+
+networks:
+  remna:
+    driver: bridge
 EOF
 
-# Set proper reload hook for certificate renewal
+# 6. Create nginx config for fallback
+cat > nginx/nginx.conf << 'NGINXEOF'
+events { worker_connections 1024; }
+
+http {
+    server {
+        listen 443 ssl;
+        server_name _;
+
+        ssl_certificate /etc/nginx/ssl/fullchain.pem;
+        ssl_certificate_key /etc/nginx/ssl/privkey.key;
+
+        location / {
+            proxy_pass http://fallback:80;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+    }
+}
+NGINXEOF
+
+# 7. Set reload hook
 ~/.acme.sh/acme.sh --install-cert -d "$DOMAIN" \
     --key-file "$CERT_DIR/privkey.key" \
     --fullchain-file "$CERT_DIR/fullchain.pem" \
-    --reloadcmd "cd $INSTALL_DIR && docker compose restart remnanode || true"
+    --reloadcmd "cd $INSTALL_DIR && docker compose restart nginx || true"
 
-# Start
- docker compose up -d
+# 8. Start
+echo "Starting containers..."
+docker compose up -d
 docker compose ps
 
 echo ""
-echo "✅ Node setup complete for $DOMAIN"
-echo "Fallback (Excalidraw) running on internal port 9443"
-echo "Test by visiting: https://$DOMAIN"
-echo ""
-echo "Important: Make sure you created the node in Remnawave Panel and assigned a Config Profile."
+echo "✅ Setup complete for $DOMAIN"
+echo "Fallback available on https://$DOMAIN:9443 (via Nginx)"
+echo "Test by visiting: https://$DOMAIN:9443"
